@@ -450,7 +450,7 @@ def dashboard():
     projects_ = q("""SELECT p.id,p.name,count(t.id) AS total, count(t.id) FILTER (WHERE t.status='done') AS done,
                      COALESCE(round(avg(t.progress)),0) AS progress
                      FROM projects p LEFT JOIN tasks t ON t.project_id=p.id GROUP BY p.id ORDER BY p.name""")
-        return jsonify(
+    return jsonify(
         counts={"total": len(tasks), "open": len(open_t), "done": len(tasks) - len(open_t),
                 "overdue": sum(1 for t in open_t if t["overdue"]),
                 "employees": q("SELECT count(*) AS c FROM users WHERE role='employee' AND active", one=True)["c"],
