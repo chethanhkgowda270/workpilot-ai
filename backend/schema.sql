@@ -69,3 +69,17 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assigned_to, status);
 CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id, is_read);
+
+CREATE TABLE IF NOT EXISTS task_requests (
+  id SERIAL PRIMARY KEY,
+  task_id INT REFERENCES tasks(id) ON DELETE SET NULL,
+  task_title VARCHAR(200) NOT NULL,
+  employee_id INT NOT NULL REFERENCES users(id),
+  category VARCHAR(20) NOT NULL CHECK (category IN ('too_many_tasks','other')),
+  message TEXT NOT NULL,
+  status VARCHAR(12) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','reassigned','stopped','declined')),
+  manager_reply TEXT,
+  created_at TIMESTAMP NOT NULL DEFAULT LOCALTIMESTAMP,
+  resolved_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_requests_status ON task_requests(status);

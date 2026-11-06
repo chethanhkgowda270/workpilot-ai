@@ -450,10 +450,11 @@ def dashboard():
     projects_ = q("""SELECT p.id,p.name,count(t.id) AS total, count(t.id) FILTER (WHERE t.status='done') AS done,
                      COALESCE(round(avg(t.progress)),0) AS progress
                      FROM projects p LEFT JOIN tasks t ON t.project_id=p.id GROUP BY p.id ORDER BY p.name""")
-    return jsonify(
+        return jsonify(
         counts={"total": len(tasks), "open": len(open_t), "done": len(tasks) - len(open_t),
                 "overdue": sum(1 for t in open_t if t["overdue"]),
-                "employees": q("SELECT count(*) AS c FROM users WHERE role='employee' AND active", one=True)["c"]},
+                "employees": q("SELECT count(*) AS c FROM users WHERE role='employee' AND active", one=True)["c"],
+                "pending_requests": q("SELECT count(*) AS c FROM task_requests WHERE status='pending'", one=True)["c"]},
         projects=projects_, overdue=[t for t in open_t if t["overdue"]][:10],
         top_priorities=open_t[:5], today=working_today(), bottlenecks=find_bottlenecks())
 
@@ -550,6 +551,100 @@ def get_daily_report():
     r = q("SELECT content FROM daily_reports WHERE user_id=%s AND report_date=CURRENT_DATE", (session["uid"],), one=True)
     return jsonify(content=r["content"] if r else "")
 
+# ---------------------------------------------------------------- change requests
+@app.post("/api/employee/requests")
+@auth("employee")
+def create_request():
+    d = request.get_json(silent=True) or {}
+    try:
+        tid = int(d.get("task_id"))
+    except (TypeError, ValueError):
+        return err("Choose the task you want to change")
+    t = q("SELECT * FROM tasks WHERE id=%s AND assigned_to=%s AND status<>'done'", (tid, session["uid"]), one=True)
+    if not t:
+        return err("Task not found", 404)
+    category = d.get("category")
+    if category not in ("too_many_tasks", "other"):
+        return err("Choose a reason")
+    message = (d.get("message") or "").strip()
+    if len(message) < 5:
+        return err("Please explain your request (at least 5 characters)")
+    if q("SELECT 1 FROM task_requests WHERE task_id=%s AND status='pending'", (tid,), one=True):
+        return err("There is already a pending request for this task")
+    q("""INSERT INTO task_requests(task_id,task_title,employee_id,category,message)
+         VALUES(%s,%s,%s,%s,%s)""", (tid, t["title"], session["uid"], category, message), commit=True)
+    why = "too many tasks" if category == "too_many_tasks" else "other reason"
+    notify(manager_id(), f"{session['name']} ({session.get('code', '')}) asked for a change to "
+                         f"'{t['title']}' ({why}): {message[:120]}", tid)
+    return jsonify(ok=True)
+
+
+@app.get("/api/employee/requests")
+@auth("employee")
+def my_requests():
+    return jsonify(q("""SELECT id,task_title,category,message,status,manager_reply,created_at,resolved_at
+                        FROM task_requests WHERE employee_id=%s ORDER BY created_at DESC""", (session["uid"],)))
+
+
+@app.get("/api/manager/requests")
+@auth("manager")
+def list_requests():
+    return jsonify(q("""
+        SELECT r.id, r.task_id, r.task_title, r.category, r.message, r.status, r.manager_reply,
+               r.created_at, r.resolved_at, u.name AS employee_name, u.emp_code, t.deadline, t.progress,
+               (SELECT count(*) FROM tasks x WHERE x.assigned_to=r.employee_id AND x.status<>'done') AS open_tasks
+        FROM task_requests r JOIN users u ON u.id=r.employee_id LEFT JOIN tasks t ON t.id=r.task_id
+        ORDER BY (r.status='pending') DESC, r.created_at DESC LIMIT 100"""))
+
+
+@app.get("/api/manager/employee-list")
+@auth("manager")
+def employee_list():
+    return jsonify(q("""
+        SELECT u.emp_code, u.name, u.post,
+               (SELECT count(*) FROM tasks t WHERE t.assigned_to=u.id AND t.status<>'done') AS open_tasks
+        FROM users u WHERE u.role='employee' AND u.active ORDER BY u.name"""))
+
+
+@app.post("/api/manager/requests/<int:rid>/resolve")
+@auth("manager")
+def resolve_request(rid):
+    r = q("SELECT * FROM task_requests WHERE id=%s", (rid,), one=True)
+    if not r:
+        return err("Request not found", 404)
+    if r["status"] != "pending":
+        return err("This request was already handled")
+    d = request.get_json(silent=True) or {}
+    action, reply = d.get("action"), (d.get("reply") or "").strip()
+    if action not in ("reassign", "stop", "decline"):
+        return err("Choose an action")
+    t = q("SELECT * FROM tasks WHERE id=%s", (r["task_id"],), one=True) if r["task_id"] else None
+    if action != "decline" and not t:
+        return err("That task no longer exists")
+    title, note = r["task_title"], (f" Manager's note: {reply}" if reply else "")
+
+    if action == "reassign":
+        new = q("SELECT * FROM users WHERE emp_code=%s AND role='employee' AND active",
+                ((d.get("new_emp_code") or "").strip(),), one=True)
+        if not new:
+            return err("Choose an employee to reassign the task to")
+        if new["id"] == r["employee_id"]:
+            return err("Choose a different employee")
+        q("UPDATE tasks SET assigned_to=%s, overdue_notified=FALSE WHERE id=%s", (new["id"], t["id"]), commit=True)
+        notify(r["employee_id"], f"Request approved: '{title}' was reassigned to {new['name']}.{note}", t["id"])
+        notify(new["id"], f"Task reassigned to you: {title} - deadline {t['deadline']:%d %b %Y, %H:%M}", t["id"])
+        outcome = "reassigned"
+    elif action == "stop":
+        q("DELETE FROM tasks WHERE id=%s", (t["id"],), commit=True)   # the request row keeps task_title
+        notify(r["employee_id"], f"Request approved: '{title}' has been stopped. You can stop working on it.{note}")
+        outcome = "stopped"
+    else:
+        notify(r["employee_id"], f"Your request about '{title}' was declined.{note}", r["task_id"])
+        outcome = "declined"
+
+    q("UPDATE task_requests SET status=%s, manager_reply=%s, resolved_at=LOCALTIMESTAMP WHERE id=%s",
+      (outcome, reply or None, rid), commit=True)
+    return jsonify(ok=True)
 
 @app.get("/")
 def index():
