@@ -103,8 +103,8 @@ function startApp() {
   $("#topbar").hidden = false;
   $("#whoami").textContent = `${me.name} (${me.role})`;
   const tabs = me.role === "manager"
-    ? [["dashboard", "Dashboard"], ["lookup", "Employee lookup"], ["team", "New Employee and Project"], ["reports", "Reports"], ["notifs", "Notifications"]]
-    : [["tasks", "My tasks"], ["report", "Daily report"], ["notifs", "Notifications"]];
+    ? [["dashboard", "Dashboard"], ["lookup", "Employee lookup"], ["requests", "Requests"], ["team", "New Employee and Project"], ["reports", "Reports"], ["notifs", "Notifications"]]
+    : [["tasks", "My tasks"], ["report", "Daily report"], ["myreq", "My requests"], ["notifs", "Notifications"]];
   $("#nav").innerHTML = tabs.map(([k, l]) => `<button data-k="${k}" onclick="go('${k}')">${l}</button>`).join("");
   go(tabs[0][0]);
   initNotifications();
@@ -113,7 +113,7 @@ function startApp() {
 function go(k) {
   document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("active", b.dataset.k === k));
   ({ dashboard: viewDashboard, lookup: viewLookup, team: viewTeam, reports: viewReports, notifs: viewNotifs,
-     tasks: viewTasks, report: viewDailyReport }[k])();
+     tasks: viewTasks, report: viewDailyReport, requests: viewRequests, myreq: viewMyRequests }[k])();
 }
 
 /* ---------------------------------------------------------- notifications / popups */
@@ -140,7 +140,7 @@ async function pollNotifications() {
     if (fresh.length) {
       api("/api/notifications/read", "POST", { ids: fresh.map(n => n.id) });
       const active = document.querySelector("#nav button.active")?.dataset.k;
-      if (active === "tasks" || active === "dashboard") go(active);
+      if (["tasks", "dashboard", "requests", "myreq"].includes(active)) go(active);
     }
   } catch { }
 }
@@ -160,7 +160,7 @@ async function viewDashboard() {
   const taskRows = (ts, extra) => ts.length ? `<table><tr><th>Task</th><th>Employee</th><th>${extra}</th></tr>` + ts.map(t => `<tr><td>${esc(t.title)}</td><td>${esc(t.employee_name)}</td><td>${extra === "Priority" ? `<span class="badge ${t.ai_priority.label}">${t.ai_priority.label}</span> <span class="mute">${esc(t.ai_priority.reason)}</span>` : fmt(t.deadline)}</td></tr>`).join("") + `</table>` : `<p class="mute">None 🎉</p>`;
   $("#view").innerHTML = `
   <div class="grid g4">
-    ${[["Employees", c.employees], ["Open tasks", c.open], ["Completed", c.done], ["Overdue", c.overdue]].map(([l, v]) => `<div class="card"><div class="stat">${v}<small>${l}</small></div></div>`).join("")}
+    ${[["Employees", c.employees], ["Open tasks", c.open], ["Completed", c.done], ["Overdue", c.overdue], ["Pending requests", c.pending_requests]].map(([l, v]) => `<div class="card"><div class="stat">${v}<small>${l}</small></div></div>`).join("")}
   </div>
   <div class="card"><h3>👥 Who is working today</h3>
     ${d.today.working.length ? `<table><tr><th>Employee</th><th>Active tasks</th></tr>` + d.today.working.map(e => `<tr><td><b>${esc(e.name)}</b><div class="mute">${esc(e.emp_code)} · ${esc(e.post || "")}</div></td><td>${e.tasks.map(t => `<div>${esc(t.title)} ${t.overdue ? '<span class="badge bad">overdue</span>' : ""} <span class="mute">due ${fmt(t.deadline)} · ${statusLabel(t.status)}</span>${bar(t.progress)}</div>`).join("")}</td></tr>`).join("") + `</table>` : `<p class="mute">Nobody has active tasks today.</p>`}
@@ -293,7 +293,7 @@ async function loadSummary() {
 
 /* ---------------------------------------------------------- employee */
 async function viewTasks() {
-  const ts = await api("/api/employee/tasks");
+    const ts = await api("/api/employee/tasks"); myTasks = ts;
   const open = ts.filter(t => t.status !== "done"), done = ts.filter(t => t.status === "done");
   $("#view").innerHTML = `<div class="card"><h3>My tasks <span class="mute">(sorted by AI-recommended priority)</span></h3>
     ${open.map(t => `
@@ -307,6 +307,7 @@ async function viewTasks() {
         <div><label>Status</label><select id="st${t.id}">${["todo", "in_progress", "blocked", "done"].map(s => `<option value="${s}" ${t.status === s ? "selected" : ""}>${statusLabel(s)}</option>`).join("")}</select></div>
         <div><label>Note</label><input id="nt${t.id}" placeholder="optional"></div>
         <button class="sm" onclick="saveTask(${t.id})">Save</button>
+          <button class="sm ghost" onclick="openRequest(${t.id})">Request change</button>
       </div>
     </div>`).join("") || `<p class="mute">No open tasks. 🎉</p>`}</div>
     ${done.length ? `<div class="card"><h3>Completed</h3>${done.map(t => `<div>✅ ${esc(t.title)} <span class="mute">${fmt(t.completed_at)}</span></div>`).join("")}</div>` : ""}`;
@@ -324,6 +325,84 @@ async function viewDailyReport() {
 }
 async function saveReport() {
   try { await api("/api/employee/daily-report", "POST", { content: $("#rep").value }); toast("Report submitted"); } catch (e) { toast(e.message); }
+}
+
+/* ---------------------------------------------------------- employee: ask the manager to change a task */
+let myTasks = [];
+
+function openRequest(id) {
+  const t = myTasks.find(x => x.id === id); if (!t) return;
+  $("#modalBox").innerHTML = `
+    <h3 style="margin-top:0">Request a change</h3>
+    <p class="mute">Task: <b>${esc(t.title)}</b></p>
+    <label>Reason</label>
+    <select id="rq_cat">
+      <option value="too_many_tasks">I have been given too many tasks</option>
+      <option value="other">Something else</option>
+    </select>
+    <label>Explain to your manager</label>
+    <textarea id="rq_msg" rows="4" placeholder="e.g. I already have 5 open tasks due this week, so I cannot finish this one in time."></textarea>
+    <div style="margin-top:14px;display:flex;gap:8px">
+      <button onclick="sendRequest(${id})">Send to manager</button>
+      <button class="ghost" onclick="closeModal()">Cancel</button>
+    </div>
+    <div id="rq_err" class="err"></div>`;
+  $("#modal").hidden = false;
+}
+
+async function sendRequest(id) {
+  try {
+    await api("/api/employee/requests", "POST", { task_id: id, category: $("#rq_cat").value, message: $("#rq_msg").value });
+    closeModal(); toast("Request sent to your manager.");
+  } catch (e) { $("#rq_err").textContent = e.message; }
+}
+
+const REQ_LABEL = { pending: "Waiting for manager", reassigned: "Approved: reassigned", stopped: "Approved: task stopped", declined: "Declined" };
+const REQ_CLASS = { pending: "warn", reassigned: "ok", stopped: "ok", declined: "bad" };
+const REQ_REASON = c => c === "too_many_tasks" ? "Too many tasks" : "Other";
+
+async function viewMyRequests() {
+  const rows = await api("/api/employee/requests");
+  $("#view").innerHTML = `<div class="card"><h3>My change requests</h3>` + (rows.length
+    ? `<table><tr><th>Task</th><th>Reason</th><th>Status</th><th>Manager's reply</th><th>Sent</th></tr>` +
+      rows.map(r => `<tr><td>${esc(r.task_title)}</td><td>${REQ_REASON(r.category)}<div class="mute">${esc(r.message)}</div></td><td><span class="badge ${REQ_CLASS[r.status]}">${REQ_LABEL[r.status]}</span></td><td>${esc(r.manager_reply || "-")}</td><td class="mute">${fmt(r.created_at)}</td></tr>`).join("") + `</table>`
+    : `<p class="mute">You have not sent any requests.</p>`) + `</div>`;
+}
+
+/* ---------------------------------------------------------- manager: handle employee requests */
+async function viewRequests() {
+  const [rows, emps] = await Promise.all([api("/api/manager/requests"), api("/api/manager/employee-list")]);
+  const pending = rows.filter(r => r.status === "pending"), done = rows.filter(r => r.status !== "pending");
+  $("#view").innerHTML = `
+  <div class="card"><h3>Pending requests (${pending.length})</h3>
+    ${pending.map(r => `
+      <div class="task">
+        <div class="task-head"><b>${esc(r.task_title)}</b><span class="badge ${r.category === "too_many_tasks" ? "warn" : ""}">${REQ_REASON(r.category)}</span></div>
+        <div class="mute">From <b>${esc(r.employee_name)}</b> (${esc(r.emp_code)}) · ${r.open_tasks} open task(s) · deadline ${fmt(r.deadline)} · ${r.progress ?? 0}% done · sent ${fmt(r.created_at)}</div>
+        <p>${esc(r.message)}</p>
+        <div class="row">
+          <div><label>Reassign to</label><select id="rn${r.id}"><option value="">- choose employee -</option>${emps.filter(e => e.emp_code !== r.emp_code).map(e => `<option value="${esc(e.emp_code)}">${esc(e.name)} (${e.open_tasks} open)</option>`).join("")}</select></div>
+          <div><label>Reply to employee (optional)</label><input id="rr${r.id}"></div>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+          <button class="sm" onclick="resolveRequest(${r.id},'reassign')">Reassign task</button>
+          <button class="sm" onclick="resolveRequest(${r.id},'stop')">Stop task</button>
+          <button class="sm ghost" onclick="resolveRequest(${r.id},'decline')">Decline request</button>
+        </div>
+      </div>`).join("") || `<p class="mute">No pending requests.</p>`}
+  </div>
+  <div class="card"><h3>History</h3>${done.length
+    ? `<table><tr><th>Employee</th><th>Task</th><th>Outcome</th><th>Your reply</th><th>Handled</th></tr>` +
+      done.map(r => `<tr><td>${esc(r.employee_name)}</td><td>${esc(r.task_title)}</td><td><span class="badge ${REQ_CLASS[r.status]}">${REQ_LABEL[r.status]}</span></td><td>${esc(r.manager_reply || "-")}</td><td class="mute">${fmt(r.resolved_at)}</td></tr>`).join("") + `</table>`
+    : `<p class="mute">Nothing handled yet.</p>`}</div>`;
+}
+
+async function resolveRequest(id, action) {
+  if (action === "stop" && !confirm("Stop this task? It will be removed permanently.")) return;
+  try {
+    await api(`/api/manager/requests/${id}/resolve`, "POST", { action, new_emp_code: $("#rn" + id).value, reply: $("#rr" + id).value });
+    toast("Done. The employee has been notified."); viewRequests();
+  } catch (e) { toast(e.message); }
 }
 
 boot();
