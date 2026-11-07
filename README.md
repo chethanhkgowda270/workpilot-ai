@@ -28,7 +28,7 @@ Stack: Flask (Python) + vanilla JavaScript + PostgreSQL.
 - Bottlenecks: blocking tasks at risk, blocked tasks, stalled work (3+ days no update), overloaded employees.
 - Weekly performance: completed, on-time, late, overdue, report consistency, score.
 - Daily summary: built-in summarizer with blocker keyword detection. Set `ANTHROPIC_API_KEY` to get Claude-written summaries instead.
-- Change requests: employees can ask the manager to reassign or stop a task (for example when overloaded); the manager approves, reassigns or declines, and the employee is notified.
+- Change requests: employees can ask the manager to reassign or stop a task (for example when overloaded); the manager approves, reassigns or declines, and the employee is notified.` 
 
 ## Before real use
 Set a strong `SECRET_KEY`, run behind HTTPS, and use gunicorn instead of `app.run(debug=True)`.
